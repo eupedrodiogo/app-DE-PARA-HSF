@@ -261,6 +261,24 @@ if uploaded_file is not None:
         
         # Configuração de correspondência
         st.markdown("### ⚙️ 3. Configuração da Correspondência")
+
+        # Guarda: impedir processamento com dados vazios
+        has_protheus_items = df_protheus['Descricao'].notna().any()
+        has_tasy_items = df_de_para['Descricao_Tasy'].notna().any()
+
+        if not (has_protheus_items and has_tasy_items):
+            st.markdown(
+                '<div class="error-box">📄 O arquivo está vazio nas abas necessárias. Preencha o modelo com itens nas colunas exigidas antes de processar.</div>',
+                unsafe_allow_html=True
+            )
+            st.download_button(
+                "📄 Baixar modelo Excel",
+                data=get_template_excel(),
+                file_name="modelo_protheus_tasy.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                help="Modelo com as abas e colunas corretamente nomeadas para uso no sistema"
+            )
+            st.stop()
         
         threshold = st.slider(
             "Limiar de Similaridade (%)",
@@ -367,7 +385,7 @@ if uploaded_file is not None:
                 st.markdown(f'<div class="info-box">💡 O arquivo será salvo como: <strong>{filename}</strong></div>', unsafe_allow_html=True)
                 
             else:
-                st.markdown('<div class="error-box">⚠️ Nenhuma correspondência encontrada com o limiar atual. Tente reduzir o limiar de similaridade.</div>', unsafe_allow_html=True)
+                st.markdown('<div class="error-box">⚠️ Nenhuma correspondência encontrada com o limiar atual. Verifique se há dados nas abas e, se necessário, reduza o limiar de similaridade.</div>', unsafe_allow_html=True)
     
     else:
         st.markdown(f'<div class="error-box">{message}</div>', unsafe_allow_html=True)
