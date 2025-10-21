@@ -57,6 +57,24 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# Regex pré-compilados para performance
+RE_SPECIAL = re.compile(r'[^a-z0-9\s]')
+RE_SPACES = re.compile(r'\s+')
+
+@st.cache_data(show_spinner=False)
+def get_template_excel():
+    """Gera um arquivo Excel de modelo com as abas e colunas esperadas."""
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        pd.DataFrame(columns=["Codigo", "Descricao"]).to_excel(
+            writer, sheet_name="Protheus", index=False, startrow=1
+        )
+        pd.DataFrame(columns=["Descrição do Material Tasy"]).to_excel(
+            writer, sheet_name="De Para Almoxarifado", index=False
+        )
+    buf.seek(0)
+    return buf.getvalue()
+
 def normalize_text(text):
     """
     Normaliza o texto para melhorar a comparação:
@@ -66,12 +84,10 @@ def normalize_text(text):
     """
     if pd.isna(text):
         return ""
-    
     text = str(text).lower()
-    # Remove caracteres especiais, mantém apenas letras, números e espaços
-    text = re.sub(r'[^a-z0-9\s]', ' ', text)
-    # Remove espaços múltiplos
-    text = re.sub(r'\s+', ' ', text)
+    # Remove caracteres especiais e espaços múltiplos usando regex pré-compilada
+    text = RE_SPECIAL.sub(" ", text)
+    text = RE_SPACES.sub(" ", text)
     return text.strip()
 
 def validate_excel_file(uploaded_file):
@@ -82,144 +98,116 @@ def validate_excel_file(uploaded_file):
     try:
         # Ler o arquivo Excel
         xls = pd.ExcelFile(uploaded_file)
-        
         # Verificar se as abas existem (case-insensitive)
         sheet_names_lower = {name.lower(): name for name in xls.sheet_names}
-        
         if 'protheus' not in sheet_names_lower:
             return False, "❌ Aba 'Protheus' não encontrada no arquivo.", None, None
-        
         if 'de para almoxarifado' not in sheet_names_lower:
             return False, "❌ Aba 'De Para Almoxarifado' não encontrada no arquivo.", None, None
-        
         # Ler as abas
         protheus_sheet = sheet_names_lower['protheus']
         de_para_sheet = sheet_names_lower['de para almoxarifado']
-        
         # Ler aba Protheus (header na linha 1) - limitar para evitar problemas de memória
-        # Ler em chunks para arquivos muito grandes
         try:
             df_protheus = pd.read_excel(uploaded_file, sheet_name=protheus_sheet, header=1, nrows=5000)
         except:
             df_protheus = pd.read_excel(uploaded_file, sheet_name=protheus_sheet, header=1)
-        
         # Ler aba De Para Almoxarifado - limitar para evitar problemas de memória
         try:
             df_de_para = pd.read_excel(uploaded_file, sheet_name=de_para_sheet, header=0, nrows=2000)
         except:
             df_de_para = pd.read_excel(uploaded_file, sheet_name=de_para_sheet, header=0)
-        
         # Validar colunas obrigatórias - case insensitive
         protheus_cols = {col.lower(): col for col in df_protheus.columns}
-        
         if 'descricao' not in protheus_cols:
             return False, "❌ Coluna 'Descricao' não encontrada na aba Protheus.", None, None
-        
         if 'codigo' not in protheus_cols:
             return False, "❌ Coluna 'Codigo' não encontrada na aba Protheus.", None, None
-        
         de_para_cols = {col.lower(): col for col in df_de_para.columns}
         desc_tasy_col = None
-        
         for col_lower, col_original in de_para_cols.items():
             if 'descri' in col_lower and 'tasy' in col_lower:
                 desc_tasy_col = col_original
                 break
-        
         if desc_tasy_col is None:
             return False, "❌ Coluna 'Descrição do Material Tasy' não encontrada na aba De Para Almoxarifado.", None, None
-        
         # Padronizar nomes das colunas
         df_protheus = df_protheus.rename(columns={
             protheus_cols['codigo']: 'Codigo',
             protheus_cols['descricao']: 'Descricao'
         })
-        
         df_de_para = df_de_para.rename(columns={desc_tasy_col: 'Descricao_Tasy'})
-        
+        # Garantir tipo consistente para Código
+        if 'Codigo' in df_protheus.columns:
+            df_protheus['Codigo'] = df_protheus['Codigo'].astype(str)
         # Adicionar mensagem sobre limitação se aplicável
         info_msg = "✅ Arquivo validado com sucesso!"
         if len(df_protheus) >= 5000:
             info_msg += f" (Limitado a {len(df_protheus)} itens Protheus para performance)"
         if len(df_de_para) >= 2000:
             info_msg += f" (Limitado a {len(df_de_para)} itens Tasy para performance)"
-        
         return True, info_msg, df_protheus, df_de_para
-        
     except Exception as e:
         return False, f"❌ Erro ao ler o arquivo: {str(e)}", None, None
 
-def find_matches(df_protheus, df_de_para, threshold):
-    """
-    Encontra correspondências entre as descrições do Protheus e Tasy.
-    """
+@st.cache_data(show_spinner=False)
+def compute_matches(protheus_descriptions, protheus_codes, protheus_original, tasy_norm_list, tasy_orig_list, threshold):
+    """Computa correspondências com cache e sem componentes visuais para performance."""
     results = []
-    
-    # Remover linhas com descrições vazias
-    df_protheus_clean = df_protheus[df_protheus['Descricao'].notna()].copy()
-    df_de_para_clean = df_de_para[df_de_para['Descricao_Tasy'].notna()].copy()
-    
-    # Normalizar textos
-    df_protheus_clean['Descricao_Normalizada'] = df_protheus_clean['Descricao'].apply(normalize_text)
-    df_de_para_clean['Descricao_Tasy_Normalizada'] = df_de_para_clean['Descricao_Tasy'].apply(normalize_text)
-    
-    # Criar lista de descrições Protheus normalizadas para comparação
-    protheus_descriptions = df_protheus_clean['Descricao_Normalizada'].tolist()
-    protheus_codes = df_protheus_clean['Codigo'].tolist()
-    protheus_original = df_protheus_clean['Descricao'].tolist()
-    
-    # Criar barra de progresso
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    total_items = len(df_de_para_clean)
-    
-    # Para cada descrição Tasy, encontrar a melhor correspondência
-    for idx, (_, row) in enumerate(df_de_para_clean.iterrows()):
-        tasy_desc = row['Descricao_Tasy']
-        tasy_desc_norm = row['Descricao_Tasy_Normalizada']
-        
-        # Encontrar as melhores correspondências usando rapidfuzz
+    for tasy_desc_norm, tasy_desc in zip(tasy_norm_list, tasy_orig_list):
         matches = process.extract(
             tasy_desc_norm,
             protheus_descriptions,
             scorer=fuzz.token_sort_ratio,
-            limit=3  # Pegar top 3 para detectar múltiplas correspondências
+            limit=3,  # top 3 para detectar múltiplas correspondências
+            score_cutoff=threshold  # evita cálculos abaixo do limiar
         )
-        
-        # Verificar se há múltiplas correspondências acima do limiar
-        matches_above_threshold = [m for m in matches if m[1] >= threshold]
-        
-        if matches_above_threshold:
-            best_match = matches_above_threshold[0]
+        if matches:
+            best_match = matches[0]
             best_match_idx = best_match[2]
             score = best_match[1]
-            
-            # Verificar se há múltiplas correspondências muito similares
             revisao_obrigatoria = False
-            if len(matches_above_threshold) > 1:
-                # Se houver mais de uma correspondência com score próximo (diferença < 5)
-                score_diff = matches_above_threshold[0][1] - matches_above_threshold[1][1]
+            if len(matches) > 1:
+                score_diff = matches[0][1] - matches[1][1]
                 if score_diff < 5:
                     revisao_obrigatoria = True
-            
             results.append({
-                'Codigo_Protheus': protheus_codes[best_match_idx],
+                'Codigo_Protheus': str(protheus_codes[best_match_idx]),
                 'Descricao_Protheus': protheus_original[best_match_idx],
                 'Descricao_Tasy': tasy_desc,
                 'Score_Similaridade': round(score, 2),
                 'Revisao_Obrigatoria': '⚠️ SIM' if revisao_obrigatoria else 'NÃO'
             })
-        
-        # Atualizar barra de progresso
-        progress = (idx + 1) / total_items
-        progress_bar.progress(progress)
-        status_text.text(f"Processando: {idx + 1} de {total_items} itens ({progress*100:.1f}%)")
-    
-    progress_bar.empty()
-    status_text.empty()
-    
     return pd.DataFrame(results)
+
+def find_matches(df_protheus, df_de_para, threshold):
+    """
+    Encontra correspondências entre as descrições do Protheus e Tasy.
+    Agora usa cache e limiar para reduzir o custo de processamento.
+    """
+    # Remover linhas com descrições vazias
+    df_protheus_clean = df_protheus[df_protheus['Descricao'].notna()].copy()
+    df_de_para_clean = df_de_para[df_de_para['Descricao_Tasy'].notna()].copy()
+    # Normalizar textos (vetorizado via apply)
+    df_protheus_clean['Descricao_Normalizada'] = df_protheus_clean['Descricao'].apply(normalize_text)
+    df_de_para_clean['Descricao_Tasy_Normalizada'] = df_de_para_clean['Descricao_Tasy'].apply(normalize_text)
+    # Preparar listas
+    protheus_descriptions = df_protheus_clean['Descricao_Normalizada'].tolist()
+    protheus_codes = df_protheus_clean['Codigo'].astype(str).tolist()
+    protheus_original = df_protheus_clean['Descricao'].tolist()
+    tasy_norm_list = df_de_para_clean['Descricao_Tasy_Normalizada'].tolist()
+    tasy_orig_list = df_de_para_clean['Descricao_Tasy'].tolist()
+    # Computar com spinner (sem barra de progresso granular, mais rápido)
+    with st.spinner("🔎 Encontrando correspondências..."):
+        df_results = compute_matches(
+            protheus_descriptions,
+            protheus_codes,
+            protheus_original,
+            tasy_norm_list,
+            tasy_orig_list,
+            threshold
+        )
+    return df_results
 
 # Interface principal
 st.markdown('<div class="main-header">🔗 Correspondência Inteligente Protheus-Tasy</div>', unsafe_allow_html=True)
@@ -232,6 +220,15 @@ uploaded_file = st.file_uploader(
     type=['xls', 'xlsx'],
     help="O arquivo deve conter as abas 'Protheus' e 'De Para Almoxarifado'"
 )
+# Oferecer modelo de arquivo quando nenhum upload foi feito
+if uploaded_file is None:
+    st.download_button(
+        "📄 Baixar modelo Excel",
+        data=get_template_excel(),
+        file_name="modelo_protheus_tasy.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        help="Modelo com as abas e colunas corretamente nomeadas para uso no sistema"
+    )
 
 if uploaded_file is not None:
     # Validar o arquivo
@@ -382,7 +379,7 @@ else:
         <h4>📝 Instruções de Uso:</h4>
         <ol>
             <li>Faça upload de um arquivo Excel contendo as abas <strong>'Protheus'</strong> e <strong>'De Para Almoxarifado'</strong></li>
-            <li>Aba <strong>Protheus</strong> deve conter as colunas: <strong>Codigo</strong> e <strong>Descricao</strong></li>
+            <li>A aba <strong>Protheus</strong> deve conter as colunas: <strong>Codigo</strong> e <strong>Descricao</strong></li>
             <li>Aba <strong>De Para Almoxarifado</strong> deve conter a coluna: <strong>Descrição do Material Tasy</strong></li>
             <li>Ajuste o limiar de similaridade conforme necessário (padrão: 80%)</li>
             <li>Clique em <strong>Iniciar Correspondência</strong> para processar</li>
